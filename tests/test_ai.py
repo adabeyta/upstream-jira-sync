@@ -1,0 +1,477 @@
+"""AI classes, SkillLoader, teams helpers, and LLM providers."""
+
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+from conftest import FakeLLM, make_issue, make_pr, make_teams, make_ticket
+from upstream_jira_sync.ai import (
+    AITicketMatcher,
+    IssueClaimClassifier,
+    IssueDeduplicator,
+    IssueSummarizer,
+    RfcClassifier,
+    StoryPointEstimator,
+    TeamClassifier,
+)
+from upstream_jira_sync.config import LLMSettings
+from upstream_jira_sync.llm.anthropic import AnthropicProvider
+from upstream_jira_sync.llm.base import load_provider
+from upstream_jira_sync.llm.vertex import VertexProvider
+from upstream_jira_sync.models import LinkedIssue
+from upstream_jira_sync.skill_loader import SkillLoader, is_bot_actor, is_bot_author
+from upstream_jira_sync.teams import (
+    primary_team_id,
+    render_team_prompt_section,
+    teams_to_labels,
+)
+
+_LOADER = SkillLoader()
+
+
+class TestSkillLoader:
+    def test_packaged_default_loads(self):
+        content = SkillLoader().load("ticket_matcher")
+        assert content
+        assert not content.startswith("---")
+
+    def test_override_dir_wins_and_frontmatter_stripped(self, tmp_path):
+        (tmp_path / "ticket_matcher.md").write_text(
+            "---\nname: Test\ndescription: A test\n---\n\nOverride content here."
+        )
+        loader = SkillLoader(override_dir=str(tmp_path))
+        assert loader.load("ticket_matcher") == "Override content here."
+
+    def test_missing_skill_raises(self, tmp_path):
+        loader = SkillLoader(override_dir=str(tmp_path))
+        with pytest.raises(FileNotFoundError, match="nonexistent"):
+            loader.load("nonexistent")
+
+    def test_override_missing_template_vars_fails_fast(self, tmp_path):
+        (tmp_path / "team_classification.md").write_text(
+            "Classify\nTitle: {pr_title}\nBody: {pr_body}\n"
+        )
+        loader = SkillLoader(override_dir=str(tmp_path))
+        with pytest.raises(ValueError) as exc_info:
+            loader.load("team_classification")
+        msg = str(exc_info.value)
+        assert "team_classification" in msg
+        assert "file_paths" in msg and "teams_section" in msg
+
+    def test_override_with_all_template_vars_passes(self, tmp_path):
+        (tmp_path / "team_classification.md").write_text(
+            "Teams:\n{teams_section}\nTitle: {pr_title}\nBody: {pr_body}\nFiles: {file_paths}\n"
+        )
+        loader = SkillLoader(override_dir=str(tmp_path))
+        assert "{teams_section}" in loader.load("team_classification")
+
+
+class TestBotIdentity:
+    def test_is_bot_author(self):
+        assert is_bot_author("  Bot@Example.COM ", "bot@example.com") is True
+        assert is_bot_author("human@example.com", "bot@example.com") is False
+        assert is_bot_author(None, "bot@example.com") is False
+        assert is_bot_author("bot@example.com", "") is False
+
+    def test_is_bot_actor_matches_email_accountid_and_aliases(self):
+        bot_email, bot_account = "bot@example.com", "acct-bot"
+        aliases = ("old-bot@example.com", "acct-old")
+        assert is_bot_actor({"emailAddress": "Bot@Example.COM"}, bot_email, bot_account)
+        assert is_bot_actor({"accountId": "acct-bot"}, bot_email, bot_account)
+        assert is_bot_actor(
+            {"emailAddress": "old-bot@example.com"}, bot_email, bot_account, aliases
+        )
+        assert is_bot_actor({"accountId": "acct-old"}, bot_email, bot_account, aliases)
+        assert not is_bot_actor(
+            {"emailAddress": "human@example.com", "accountId": "999"},
+            bot_email,
+            bot_account,
+        )
+
+    def test_is_bot_actor_empty_author_is_not_bot(self):
+        assert is_bot_actor(None, "bot@example.com", "acct-1") is False
+        assert is_bot_actor({}, "bot@example.com", "acct-1") is False
+
+
+def make_matcher(response_text='{"key": null, "confidence": "low", "reason": "none"}'):
+    llm = FakeLLM(response_text)
+    return AITicketMatcher(llm=llm, skill_loader=_LOADER), llm
+
+
+class TestAITicketMatcher:
+    def test_empty_tickets_returns_none(self):
+        matcher, _ = make_matcher()
+        assert matcher.find_best(make_pr(), []) is None
+
+    def test_non_high_confidence_returns_none(self):
+        matcher, _ = make_matcher(
+            '{"key": "PROJ-100", "confidence": "medium", "reason": "maybe"}'
+        )
+        assert (
+            matcher.find_best(make_pr(), [make_ticket("PROJ-100", "Transport")]) is None
+        )
+
+    def test_high_confidence_returns_match_result(self):
+        matcher, _ = make_matcher(
+            '{"key": "PROJ-100", "confidence": "high", "reason": "Clear match"}'
+        )
+        result = matcher.find_best(make_pr(), [make_ticket("PROJ-100", "Transport")])
+        assert result is not None
+        assert result.ticket.key == "PROJ-100"
+        assert result.confidence == "high"
+        assert result.reason == "Clear match"
+
+    def test_unknown_key_returns_none(self):
+        matcher, _ = make_matcher(
+            '{"key": "PROJ-999", "confidence": "high", "reason": "Match"}'
+        )
+        assert (
+            matcher.find_best(make_pr(), [make_ticket("PROJ-100", "Transport")]) is None
+        )
+
+    def test_markdown_fences_stripped(self):
+        matcher, _ = make_matcher(
+            '```json\n{"key": "PROJ-100", "confidence": "high", "reason": "match"}\n```'
+        )
+        result = matcher.find_best(make_pr(), [make_ticket("PROJ-100", "Transport")])
+        assert result is not None and result.ticket.key == "PROJ-100"
+
+    def test_api_failure_returns_none(self):
+        matcher = AITicketMatcher(
+            llm=FakeLLM(error=Exception("network error")), skill_loader=_LOADER
+        )
+        assert (
+            matcher.find_best(make_pr(), [make_ticket("PROJ-100", "Transport")]) is None
+        )
+
+    def test_url_match_returns_high_without_calling_llm(self):
+        matcher, llm = make_matcher(
+            '{"key": null, "confidence": "low", "reason": "no"}'
+        )
+        ticket = make_ticket("PROJ-1", "Unrelated title")
+        ticket.remote_links = ["https://github.com/exampleorg/widgets/issues/7"]
+        pr = make_pr(
+            linked_issues=(
+                LinkedIssue(
+                    number=7,
+                    title="Issue 7",
+                    url="https://github.com/exampleorg/widgets/issues/7",
+                ),
+            )
+        )
+
+        result = matcher.find_best(pr, [ticket])
+
+        assert result is not None
+        assert result.ticket.key == "PROJ-1"
+        assert result.confidence == "high"
+        assert llm.calls == []
+
+    def test_no_url_overlap_falls_back_to_llm(self):
+        matcher, llm = make_matcher(
+            '{"key": "PROJ-1", "confidence": "medium", "reason": "fallback"}'
+        )
+        ticket = make_ticket("PROJ-1", "Something")
+        ticket.remote_links = ["https://github.com/exampleorg/widgets/issues/99"]
+        pr = make_pr(
+            linked_issues=(
+                LinkedIssue(
+                    number=7,
+                    title="Issue 7",
+                    url="https://github.com/exampleorg/widgets/issues/7",
+                ),
+            )
+        )
+
+        assert matcher.find_best(pr, [ticket]) is None
+        assert len(llm.calls) == 1
+
+    def test_prompt_includes_description_and_links(self):
+        matcher, llm = make_matcher()
+        ticket = make_ticket("PROJ-1", "Lowering work")
+        ticket.description = "Lower view/reshape ops to fused kernels."
+        ticket.remote_links = ["https://github.com/exampleorg/widgets/issues/99"]
+        pr = make_pr(
+            linked_issues=(
+                LinkedIssue(
+                    number=11,
+                    title="t",
+                    url="https://github.com/exampleorg/widgets/issues/11",
+                ),
+            )
+        )
+
+        matcher.find_best(pr, [ticket])
+
+        prompt = llm.calls[0]["user_message"]
+        assert "Lower view/reshape ops to fused kernels." in prompt
+        assert "https://github.com/exampleorg/widgets/issues/11" in prompt
+        assert "https://github.com/exampleorg/widgets/issues/99" in prompt
+
+
+class TestStoryPointEstimator:
+    def _estimator(self, response_text):
+        return StoryPointEstimator(llm=FakeLLM(response_text), skill_loader=_LOADER)
+
+    def test_valid_estimate(self):
+        est = self._estimator('{"points": 5, "reason": "Medium"}')
+        assert est.estimate(make_pr(), make_ticket("PROJ-1", "Test")) == 5
+
+    def test_invalid_points_returns_none(self):
+        est = self._estimator('{"points": 7, "reason": "bad"}')
+        assert est.estimate(make_pr(), make_ticket("PROJ-1", "Test")) is None
+
+    def test_api_failure_returns_none(self):
+        est = StoryPointEstimator(
+            llm=FakeLLM(error=Exception("down")), skill_loader=_LOADER
+        )
+        assert est.estimate(make_pr(), make_ticket("PROJ-1", "Test")) is None
+
+    def test_estimate_from_issue(self):
+        est = self._estimator('{"points": 3, "reason": "medium"}')
+        assert (
+            est.estimate_from_issue(make_ticket("PROJ-1", "x"), "Fix kernel", "details")
+            == 3
+        )
+
+        bad = self._estimator('{"points": 4, "reason": "x"}')
+        assert bad.estimate_from_issue(make_ticket("PROJ-1", "x"), "t", "b") is None
+
+
+class TestIssueClaimClassifier:
+    def _classifier(self, response_text="", error=None):
+        return IssueClaimClassifier(
+            llm=FakeLLM(response_text, error=error), skill_loader=_LOADER
+        )
+
+    def test_claiming_intent(self):
+        clf = self._classifier(
+            '{"intent": "claiming", "reason": "User will submit a fix"}'
+        )
+        assert (
+            clf.classify(make_issue(), "I'll submit a fix", "octocat").intent
+            == "claiming"
+        )
+
+    def test_invalid_intent_defaults_to_not_claiming(self):
+        clf = self._classifier('{"intent": "maybe", "reason": "unclear"}')
+        assert clf.classify(make_issue(), "comment", "octocat").intent == "not_claiming"
+
+    def test_api_failure_returns_not_claiming(self):
+        clf = self._classifier(error=Exception("API down"))
+        assert (
+            clf.classify(make_issue(), "I'll fix this", "octocat").intent
+            == "not_claiming"
+        )
+
+
+class TestIssueDeduplicator:
+    def test_high_confidence_returns_match(self):
+        d = IssueDeduplicator(
+            llm=FakeLLM(
+                '{"key": "PROJ-1", "confidence": "high", "reason": "same bug"}'
+            ),
+            skill_loader=_LOADER,
+        )
+        tickets = [
+            make_ticket("PROJ-1", "matrix op rejects dense input"),
+            make_ticket("PROJ-2", "x"),
+        ]
+        result = d.find_existing("matrix op rejects dense input", "body", tickets)
+        assert result is not None and result.ticket.key == "PROJ-1"
+
+    def test_medium_confidence_returns_none(self):
+        d = IssueDeduplicator(
+            llm=FakeLLM('{"key": "PROJ-1", "confidence": "medium", "reason": "maybe"}'),
+            skill_loader=_LOADER,
+        )
+        assert d.find_existing("t", "b", [make_ticket("PROJ-1", "s")]) is None
+
+
+class TestIssueSummarizer:
+    def test_returns_summary_text(self):
+        s = IssueSummarizer(
+            llm=FakeLLM("Fixes 64-bit overflow in range codegen."), skill_loader=_LOADER
+        )
+        assert "overflow" in s.summarize("Fix overflow", "Long body about the bug...")
+
+    def test_api_failure_returns_empty(self):
+        s = IssueSummarizer(llm=FakeLLM(error=Exception("down")), skill_loader=_LOADER)
+        assert s.summarize("title", "body") == ""
+
+
+class TestRfcClassifier:
+    def _classifier(self, response_text="", error=None):
+        return RfcClassifier(
+            llm=FakeLLM(response_text, error=error), skill_loader=_LOADER
+        )
+
+    def test_valid_verdict_passes_through(self):
+        clf = self._classifier('{"verdict": "epic", "reason": "scope"}')
+        assert clf.classify("[RFC] Foo", "body") == "epic"
+
+    def test_unknown_verdict_returns_none(self):
+        clf = self._classifier('{"verdict": "container", "reason": "?"}')
+        assert clf.classify("[RFC] Foo", "body") is None
+
+    def test_api_failure_returns_none(self):
+        clf = self._classifier(error=Exception("down"))
+        assert clf.classify("[RFC] Foo", "body") is None
+
+
+class TestTeamClassifier:
+    def _classifier(
+        self, response_text="", error=None
+    ) -> tuple[TeamClassifier, FakeLLM]:
+        llm = FakeLLM(response_text, error=error)
+        return TeamClassifier(
+            llm=llm, skill_loader=SkillLoader(), teams=make_teams()
+        ), llm
+
+    def test_classify_returns_canonical_teams(self):
+        clf, _ = self._classifier('["Team Alpha"]')
+        assert clf.classify("t", "b", ("a.py",)) == {"Team Alpha"}
+
+    def test_classify_handles_garbage_response(self):
+        clf, _ = self._classifier("Sure, here are the teams: none")
+        assert clf.classify("t", "b", ("a.py",)) == set()
+
+    def test_classify_api_error_returns_empty(self):
+        clf, _ = self._classifier(error=Exception("API down"))
+        assert clf.classify("t", "b", ("a.py",)) == set()
+
+    def test_classify_ordered_keeps_primary_first_and_dedups(self):
+        clf, _ = self._classifier(
+            '["Team Beta", "Team Alpha", "Team Beta", "Team Delta"]'
+        )
+        assert clf.classify_ordered("t", "b", ("a.py",)) == ["Team Beta", "Team Alpha"]
+
+    def test_prompt_templated_from_config_teams(self):
+        clf, llm = self._classifier("[]")
+        clf.classify_ordered("Fix reconnect", "body text", ("net/a.py",))
+        prompt = llm.calls[0]["user_message"]
+        assert "- Team Alpha" in prompt
+        assert "- Team Beta" in prompt
+        assert "Fix reconnect" in prompt
+        assert "net/a.py" in prompt
+
+
+class TestTeamsHelpers:
+    def test_teams_to_labels_sorted_and_unknown_dropped(self):
+        labels = teams_to_labels(
+            make_teams(), ["Team Beta", "Team Alpha", "Team Delta"]
+        )
+        assert labels == ["team-alpha", "team-beta"]
+
+    def test_primary_team_id_first_mapped(self):
+        assert (
+            primary_team_id(make_teams(), ["Team Beta", "Team Alpha"])
+            == "team-uuid-beta"
+        )
+        assert primary_team_id(make_teams(), []) is None
+        # Configured team without a team_id resolves to None.
+        assert primary_team_id(make_teams(), ["Team Gamma"]) is None
+
+    def test_render_team_prompt_section(self):
+        assert render_team_prompt_section(make_teams()) == (
+            "- Team Alpha\n- Team Beta\n- Team Gamma"
+        )
+
+
+def _llm_response(text: str) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"content": [{"text": text}]}
+    return resp
+
+
+class TestAnthropicProvider:
+    def test_requires_api_key_unless_mocked(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+                AnthropicProvider(LLMSettings(provider="anthropic", model="m"))
+            AnthropicProvider(
+                LLMSettings(
+                    provider="anthropic", model="m", base_url="http://localhost:9999"
+                )
+            )
+
+    def test_complete_posts_message_and_returns_text(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}, clear=True):
+            provider = AnthropicProvider(
+                LLMSettings(provider="anthropic", model="test-model")
+            )
+        provider._session = MagicMock()
+        provider._session.request.return_value = _llm_response("  hello  ")
+
+        result = provider.complete("sys", "user msg", max_tokens=128)
+
+        assert result == "hello"
+        call = provider._session.request.call_args
+        assert call.args[1] == "https://api.anthropic.com/v1/messages"
+        body = call.kwargs["json"]
+        assert body["model"] == "test-model"
+        assert body["max_tokens"] == 128
+        assert body["system"] == "sys"
+        assert body["messages"] == [{"role": "user", "content": "user msg"}]
+
+    def test_base_url_reroutes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            provider = AnthropicProvider(
+                LLMSettings(
+                    provider="anthropic", model="m", base_url="http://localhost:9999"
+                )
+            )
+        assert provider._url == "http://localhost:9999/v1/messages"
+
+
+class TestVertexProvider:
+    def _provider(self) -> VertexProvider:
+        return VertexProvider(
+            LLMSettings(
+                provider="vertex",
+                model="test-model",
+                vertex_project="test-project",
+                vertex_region="test-region",
+                base_url="http://localhost:9999",
+            )
+        )
+
+    def test_mock_base_url_skips_gcp_auth(self):
+        provider = self._provider()
+        assert provider._credentials is None
+        assert provider._url_prefix.startswith(
+            "http://localhost:9999/v1/projects/test-project"
+        )
+
+    def test_complete_calls_rawpredict_and_returns_text(self):
+        provider = self._provider()
+        provider._session = MagicMock()
+        provider._session.request.return_value = _llm_response("answer")
+
+        assert provider.complete("sys", "hello") == "answer"
+        url = provider._session.request.call_args.args[1]
+        assert url.endswith("test-model:rawPredict")
+        body = provider._session.request.call_args.kwargs["json"]
+        assert body["anthropic_version"] == "vertex-2023-10-16"
+
+
+class TestLoadProvider:
+    def test_unknown_provider_raises(self):
+        with pytest.raises(ValueError, match="Unknown llm.provider"):
+            load_provider(LLMSettings(provider="nope", model="m"))
+
+    def test_builtin_providers_resolve(self):
+        settings = LLMSettings(
+            provider="anthropic", model="m", base_url="http://localhost:9999"
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            assert isinstance(load_provider(settings), AnthropicProvider)
+        vertex_settings = LLMSettings(
+            provider="vertex",
+            model="m",
+            vertex_project="p",
+            base_url="http://localhost:9999",
+        )
+        assert isinstance(load_provider(vertex_settings), VertexProvider)

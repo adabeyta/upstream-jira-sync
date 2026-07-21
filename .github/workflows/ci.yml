@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[dev,vertex]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Test
+        env:
+          TENANT_LEAK_PATTERNS: ${{ vars.TENANT_LEAK_PATTERNS }}
+        run: python -m pytest tests/ -v
+
+  leak-grep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on tenant literals
+        env:
+          # Space-separated regexes of tenant-specific literals (org names,
+          # real custom field ids, internal project strings). Set as a repo
+          # Actions variable so the public workflow never reveals them.
+          TENANT_LEAK_PATTERNS: ${{ vars.TENANT_LEAK_PATTERNS }}
+        run: |
+          set -uo pipefail
+          exclude=(--exclude-dir=.git --exclude-dir=.github --exclude-dir=__pycache__ --exclude-dir='*.egg-info')
+          fail=0
+          for pattern in ${TENANT_LEAK_PATTERNS:-}; do
+            hits=$(grep -rniE "${exclude[@]}" -e "$pattern" . || true)
+            if [ -n "$hits" ]; then
+              echo "::error::tenant literal matching '$pattern' found:"
+              echo "$hits"
+              fail=1
+            fi
+          done
+          hits=$(grep -rnoiE "${exclude[@]}" \
+            -e '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' . \
+            | grep -viE '00000000-0000-0000-0000-000000000000' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::UUID-shaped string found (Atlassian team ids belong in deployment config):"
+            echo "$hits"
+            fail=1
+          fi
+          exit "$fail"
+      - name: Fail on email-shaped strings
+        run: |
+          set -uo pipefail
+          hits=$(grep -rnoiE --exclude-dir=.git --exclude-dir=.github \
+            --exclude-dir=__pycache__ --exclude-dir='*.egg-info' \
+            -e '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' . \
+            | grep -viE '@example\.(com|org|net)' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::email-shaped string found; use @example.com placeholders:"
+            echo "$hits"
+            exit 1
+          fi

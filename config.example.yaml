@@ -1,0 +1,173 @@
+# upstream-jira-sync configuration example.
+# Copy into your private deployment repo as config.yaml and adjust.
+#
+# Secrets are NEVER placed in this file. They come from environment variables:
+#   GITHUB_TOKEN (or GH_PAT)  GitHub token with repo + read:discussion scopes
+#   JIRA_EMAIL                service account email
+#   JIRA_API_TOKEN            Jira API token
+#   JIRA_ACCOUNT_ID           optional; service account's Atlassian accountId
+#   ROSTER_YAML               optional; roster as a YAML string (overrides roster_file)
+#   ANTHROPIC_API_KEY         required by llm.provider=anthropic
+#   GOOGLE_APPLICATION_CREDENTIALS  llm.provider=vertex; path to GCP credentials JSON
+#   GOOGLE_CLOUD_PROJECT      llm.provider=vertex; or set llm.vertex_project below
+
+settings:
+  # ── Jira instance ──────────────────────────────────────────────────────────
+  jira_url: https://yourcompany.atlassian.net
+  jira_project_key: PROJ
+
+  # When rotating the service account, add the old email/accountId here so old
+  # changelog entries still count as bot writes for the manual-override gate.
+  jira_bot_aliases: []
+
+  # Jira components applied to every auto-created ticket. Must match component
+  # names exactly as defined in the Jira project. Empty list disables.
+  jira_components: []
+
+  # ── Jira workflow mapping ──────────────────────────────────────────────────
+  # Map the four canonical states to YOUR project's exact status names.
+  # Transitions are resolved by target status, never by transition name.
+  status_map:
+    todo: To Do
+    in_progress: In Progress
+    review: In Review
+    done: Done
+
+  # Issue types used by the sync. The container type groups child work items
+  # (RFC tracking, parenting) and is excluded from PR-driven sync.
+  issue_type: Story
+  container_issue_type: Epic
+
+  # Labels a merge bot applies when it "merges" a PR by closing it + labeling.
+  # Empty (default) means only natively merged PRs count as merged.
+  merge_labels: []
+  # merge_labels:
+  #   - Merged
+
+  # ── GitHub ────────────────────────────────────────────────────────────────
+  github_repo:
+    - yourorg/your-upstream-repo
+    - yourorg/another-repo
+
+  # Roster file path, relative to this config file. Ignored when ROSTER_YAML is
+  # set. Format: list of {github: <handle>, jira_email: <assignee email>}.
+  roster_file: team_roster.yaml
+
+  # Bot accounts whose PRs/reviews are ignored in review-activity stats.
+  bot_logins:
+    - dependabot[bot]
+    - github-actions[bot]
+
+  # ── LLM provider ──────────────────────────────────────────────────────────
+  llm:
+    provider: anthropic        # anthropic | vertex | any installed entry point
+    model: claude-sonnet-4-6
+    # vertex only:
+    # vertex_project: your-gcp-project-id
+    # vertex_region: us-east5
+
+  # ── Tuning ────────────────────────────────────────────────────────────────
+  poll_interval_hours: 48      # override per-run with --since-hours
+  # CHANGES_REQUESTED review count that flips a ticket review -> in_progress.
+  significant_comments_threshold: 3
+  # Open PRs carrying any of these labels are skipped entirely.
+  # Activity by these accounts (plus any GitHub App bot like github-actions[bot])
+  # never counts as PR activity: it can't pull a PR back into the sync window,
+  # reopen a stale-closed ticket into Review, or reset the staleness clock.
+  # List your project's user-typed merge/CI bot accounts here.
+  ignore_activity_authors: []
+
+  ignore_pr_labels:
+    - Stale
+
+  # ── Story point estimation ────────────────────────────────────────────────
+  enable_estimation: false
+  # Required when enable_estimation is true (your instance's points field id):
+  # story_points_field: customfield_XXXXX
+
+  # Multi-user picker custom field collecting co-authors on multi-author PRs.
+  # Empty disables (co-authors still get the Jira note + digest event).
+  # contributors_field: customfield_XXXXX
+
+  # ── AI prompt overrides ───────────────────────────────────────────────────
+  # Directory of per-file overrides for the packaged skills/*.md prompts.
+  # Relative paths resolve against this config file; the directory must exist.
+  # Any file NOT present here falls back to the packaged default.
+  # skills_dir: skills
+
+  # ── Issue claiming / auto-create ──────────────────────────────────────────
+  enable_auto_create: false
+  claim_mode: shadow           # shadow | auto
+
+  # Close a ticket whose linked PR(s) have been idle this many days. 0 = off.
+  stale_pr_close_days: 21
+  stale_pr_close_mode: shadow  # shadow | auto
+
+  # ── Sprints ───────────────────────────────────────────────────────────────
+  # Date-math from the anchor picks the current sprint NUMBER; the bot writes
+  # the native Jira sprint field by exact-name match on the board.
+  enable_sprint_tagging: false
+  sprint_mode: shadow          # shadow | auto
+  # sprint_anchor_date: "2026-01-05"    # a known sprint's start date
+  # sprint_anchor_number: 1             # that sprint's number
+  sprint_length_days: 14
+  # sprint_board_id: 123
+  sprint_name_format: "Sprint {number}"
+  # Required when any sprint feature is enabled:
+  # sprint_field: customfield_XXXXX
+
+  # Nightly add of open tickets to the current native sprint.
+  enable_sprint_sweep: false
+  sprint_sweep_mode: shadow    # shadow | auto
+  sprint_sweep_lookback_sprints: 1
+
+  # Rolling pre-creation of upcoming sprints (current+1 .. current+lookahead).
+  enable_sprint_provision: false
+  sprint_provision_mode: shadow  # shadow | auto
+  sprint_provision_lookahead: 2
+
+  # ── Weekly digest (GitHub Discussion) ─────────────────────────────────────
+  digest_enabled: false
+  digest_include_manual: true
+  digest_include_reviews: true
+  # digest_repo: yourorg/your-deployment-repo
+  digest_category_slug: announcements
+  digest_title_prefix: "Weekly digest"
+
+  # ── Manual override persistence ───────────────────────────────────────────
+  # Human edits in Jira are respected until the PR moves to a new stage.
+  enable_manual_override: true
+  manual_override_mode: shadow  # shadow = log skips but still write; auto = skip
+  manual_override_fields:
+    - status
+
+  # ── Team assignment ───────────────────────────────────────────────────────
+  # Classifies each PR into one of YOUR teams; the classification prompt is
+  # templated from this list at runtime. team_id is the optional Atlassian
+  # team UUID for the native Team field; label is the Jira label to apply.
+  enable_team_assignment: false
+  team_assignment_mode: shadow  # shadow | auto
+  teams: []
+  # teams:
+  #   - name: Runtime team
+  #     label: runtime
+  #     team_id: 00000000-0000-0000-0000-000000000001
+  #   - name: Tooling team
+  #     label: tooling
+  # Required when any team above sets team_id:
+  # team_field: customfield_XXXXX
+
+  # ── RFC / container-issue tracking ────────────────────────────────────────
+  # Issues titled [RFC]/RFC: become container issues; referencing PRs parent
+  # under them.
+  enable_rfc_epics: false
+  rfc_epic_mode: shadow        # shadow | auto
+  rfc_overrides: {}            # issue URL -> existing container issue key
+  # Some instances require an "Epic Name" field at create time; omit if yours
+  # does not (the field is then left out of the create payload):
+  # epic_name_field: customfield_XXXXX
+
+  # ── Low-confidence email pings ────────────────────────────────────────────
+  enable_low_conf_email: false
+  low_conf_email_mode: shadow  # shadow | auto
+  # low_conf_email_from: bot@example.com

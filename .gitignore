@@ -1,0 +1,7 @@
+team_roster.yaml
+sync_state.json
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/

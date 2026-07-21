@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=81.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "upstream-jira-sync"
+version = "0.1.0"
+description = "Config-driven GitHub-to-Jira sync framework for upstream contribution teams"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31,<3",
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+vertex = [
+    "google-auth>=2.20,<3",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+upstream-jira-sync = "upstream_jira_sync.cli:main"
+
+[project.entry-points."upstream_jira_sync.llm"]
+vertex = "upstream_jira_sync.llm.vertex:VertexProvider"
+anthropic = "upstream_jira_sync.llm.anthropic:AnthropicProvider"
+
+[tool.setuptools.packages.find]
+include = ["upstream_jira_sync*"]
+
+[tool.setuptools.package-data]
+upstream_jira_sync = ["skills/*.md"]

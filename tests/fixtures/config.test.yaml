@@ -1,0 +1,38 @@
+# Test config for the mock-server end-to-end run and the test suite.
+# jira_url is replaced by --mock-url at runtime.
+settings:
+  jira_url: https://mock.invalid
+  jira_project_key: PROJ
+
+  status_map:
+    todo: To Do
+    in_progress: In Progress
+    review: In Review
+    done: Done
+
+  issue_type: Story
+  container_issue_type: Epic
+  merge_labels: []
+
+  github_repo:
+    - exampleorg/widgets
+
+  roster_file: team_roster.yaml
+
+  llm:
+    provider: anthropic
+    model: mock-model
+
+  poll_interval_hours: 48
+  significant_comments_threshold: 3
+
+  enable_estimation: true
+  story_points_field: customfield_12345
+
+  enable_auto_create: false
+  stale_pr_close_days: 0
+
+  enable_manual_override: true
+  manual_override_mode: shadow
+  manual_override_fields:
+    - status

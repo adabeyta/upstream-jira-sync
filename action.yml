@@ -1,0 +1,85 @@
+name: upstream-jira-sync
+description: >-
+  Sync your team's upstream GitHub contribution activity to Jira: AI PR-ticket
+  matching, status transitions, story point estimation, and optional sprints,
+  digests, and auto-created tickets.
+branding:
+  icon: refresh-cw
+  color: blue
+
+inputs:
+  command:
+    description: "Subcommand to run: sync or check-config"
+    default: sync
+  config:
+    description: Path to config.yaml
+    default: config.yaml
+  state-file:
+    description: Path to the sync state file (sync only)
+    default: sync_state.json
+  dry-run:
+    description: Read APIs but write nothing to Jira (sync only)
+    default: "false"
+  member:
+    description: Restrict the run to one GitHub username (sync only)
+    default: ""
+  since-hours:
+    description: Override the poll window in hours, e.g. for backfills (sync only)
+    default: ""
+  live:
+    description: Run the authenticated read-only preflight (check-config only)
+    default: "false"
+  extras:
+    description: Comma-separated pip extras, e.g. "vertex" for the Vertex AI provider
+    default: ""
+  python-version:
+    description: Python version to set up
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # The `uses:` ref that selected this action also selected the framework
+    # source checked out at github.action_path, so the install below is pinned
+    # to that exact tag by construction.
+    - shell: bash
+      env:
+        EXTRAS: ${{ inputs.extras }}
+      run: |
+        if [ -n "$EXTRAS" ]; then
+          pip install --quiet "${{ github.action_path }}[$EXTRAS]"
+        else
+          pip install --quiet "${{ github.action_path }}"
+        fi
+
+    - shell: bash
+      env:
+        CMD: ${{ inputs.command }}
+        CONFIG: ${{ inputs.config }}
+        STATE_FILE: ${{ inputs.state-file }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        MEMBER: ${{ inputs.member }}
+        SINCE_HOURS: ${{ inputs.since-hours }}
+        LIVE: ${{ inputs.live }}
+      run: |
+        ARGS=(--config "$CONFIG")
+        case "$CMD" in
+          sync)
+            ARGS+=(--state-file "$STATE_FILE")
+            if [ "$DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+            if [ -n "$MEMBER" ]; then ARGS+=(--member "$MEMBER"); fi
+            if [ -n "$SINCE_HOURS" ]; then ARGS+=(--since-hours "$SINCE_HOURS"); fi
+            ;;
+          check-config)
+            if [ "$LIVE" = "true" ]; then ARGS+=(--live); fi
+            ;;
+          *)
+            echo "unknown command: $CMD (expected sync or check-config)" >&2
+            exit 1
+            ;;
+        esac
+        upstream-jira-sync "$CMD" "${ARGS[@]}"
