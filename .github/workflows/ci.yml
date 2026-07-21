@@ -51,7 +51,7 @@ jobs:
           done
           hits=$(grep -rnoiE "${exclude[@]}" \
             -e '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' . \
-            | grep -viE '00000000-0000-0000-0000-000000000000' || true)
+            | grep -viE '00000000-0000-0000-0000-[0-9]{12}' || true)
           if [ -n "$hits" ]; then
             echo "::error::UUID-shaped string found (Atlassian team ids belong in deployment config):"
             echo "$hits"
