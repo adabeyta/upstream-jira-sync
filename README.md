@@ -37,6 +37,49 @@ Every optional feature ships disabled and starts in `shadow` mode when
 enabled: it logs exactly what it would do without writing. You flip each
 feature to `auto` only after its shadow output looks right.
 
+## What runs when
+
+With the deployment template's workflows:
+
+- **Nightly sync** — for each roster member's recent upstream activity:
+  matches PRs to tickets and moves them (opened/under review → your `review`
+  status, significant rework → `in_progress`, merged → `done`), links the PR
+  and leaves one audit comment, creates tickets where none exist, estimates
+  points, closes tickets whose PRs went idle, parents RFC work under
+  container issues, and leaves human status edits alone until the PR moves.
+- **Weekly digest** — posts the week's bot and manual ticket activity as a
+  GitHub Discussion.
+- **On every PR to the deployment repo** — CI validates config, roster, and
+  prompt overrides, so broken config can't merge.
+
+Three rules cover most of the config: every feature is an `enable_*` flag
+with a `shadow`/`auto` mode; `status_map` must match your Jira project's
+exact status names (the only workflow coupling — verify with
+`check-config --live`); and the roster alone decides whose activity is
+synced.
+
+## Splitting into teams
+
+If your org has multiple sub-teams sharing one Jira project, the bot can tag
+each ticket with its owning team so dashboards split cleanly:
+
+```yaml
+enable_team_assignment: true
+team_assignment_mode: shadow   # flip to auto once tags look right
+teams:
+  - name: Runtime team          # exact display name
+    label: runtime              # Jira label to apply
+    # team_id: <Atlassian team id>  # only if dashboards use the native Team field
+  - name: Tooling team
+    label: tooling
+# team_field: customfield_XXXXX     # required only when any team_id is set
+```
+
+An LLM classifies each PR against this list from its title, body, and file
+paths. When classification needs per-team scope hints (paths, keywords), add
+a `team_classification.md` override in your `skills_dir` — the packaged
+prompt injects your team list via `{teams_section}`.
+
 ## The two-repo model
 
 The framework is split from team data so it can be public and shared:
