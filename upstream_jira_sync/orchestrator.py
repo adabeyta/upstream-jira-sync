@@ -177,6 +177,7 @@ class SyncOrchestrator:
         issues = self._github.get_issues(
             github_username=member.github,
             since_hours=self._config.poll_interval_hours,
+            is_open=True,
         )
 
         for issue in issues:
@@ -198,6 +199,14 @@ class SyncOrchestrator:
         member: TeamMember,
         summary: SyncSummary,
     ) -> None:
+        if issue.state != "open":
+            log.debug(
+                "  Skipping closed issue #%d (%s)",
+                issue.number,
+                issue.state,
+            )
+            return
+
         if self._config.enable_rfc_epics and _RFC_TITLE_RE.match(issue.title or ""):
             verdict = "epic"
             if self._rfc_classifier is not None:

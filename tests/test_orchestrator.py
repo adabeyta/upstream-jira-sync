@@ -422,6 +422,21 @@ class TestIssueClaiming:
         orch.run()
         clf.classify.assert_not_called()
 
+    def test_get_issues_called_with_is_open(self, tmp_path):
+        orch, github, _, _, _ = self._orch(tmp_path, claim_mode="auto")
+        orch.run()
+        assert github.get_issues.call_args.kwargs.get("is_open") is True
+
+    def test_closed_issue_skips_classifier_and_creation(self, tmp_path):
+        orch, _, jira, clf, state = self._orch(tmp_path, claim_mode="auto")
+        closed_issue = replace(make_issue(number=99), state="closed")
+
+        orch._classify_and_handle_issue(closed_issue, MEMBER, MagicMock())
+
+        clf.classify.assert_not_called()
+        jira.create_ticket.assert_not_called()
+        assert not state.is_issue_processed(closed_issue.url)
+
     def test_disabled_auto_create_skips_issues(self, tmp_path):
         orch, github, _, _, _ = _make_orchestrator(
             tmp_path,
