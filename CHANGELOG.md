@@ -5,27 +5,7 @@ All notable changes to upstream-jira-sync are documented here. The format follow
 [SemVer](https://semver.org/) (see CONTRIBUTING.md for what counts as
 breaking).
 
-## [Unreleased]
-
-### Added
-
-- `jira_components` setting: Jira components applied to every auto-created
-  ticket (Stories, PR tickets, and container issues).
-- `ignore_activity_authors` setting: activity by configured bot logins (plus
-  any App-typed or `[bot]`-suffixed account) no longer counts as PR activity —
-  it cannot pull a PR back into the sync window, reopen a stale-closed ticket,
-  or reset the staleness clock. New `bot_activity` outcome counter.
-- Co-author crediting on multi-author PRs: team-roster commit authors get an
-  attributed Jira mention note on the PR's tracking ticket, an optional append
-  to a `contributors_field` multi-user picker, and a `co_author_noted` digest
-  event. New `--member` runs still recognize the full roster.
-
-### Fixed
-
-- Digest tests no longer age out of the `STATE_TTL_DAYS` pruning window
-  (state-file fixtures now use relative timestamps).
-
-## [0.1.0] - 2026-07-14
+## [0.1.0] - 2026-07-23
 
 ### Added
 
@@ -46,3 +26,17 @@ breaking).
   HTTP error messages, per-person attribution only under the state file's
   `digest` namespace, no activity-volume ranking, tenant-literal leak-grep in
   CI.
+- `jira_components` setting: Jira components applied to every auto-created
+  ticket (Stories, PR tickets, and container issues).
+- `ignore_activity_authors` setting: activity by configured bot logins (plus
+  any App-typed or `[bot]`-suffixed account) no longer counts as PR activity —
+  it cannot pull a PR back into the sync window, reopen a stale-closed ticket,
+  or reset the staleness clock. New `bot_activity` outcome counter.
+- Co-author crediting on multi-author PRs: team-roster commit authors get an
+  attributed Jira mention note on the PR's tracking ticket, an optional append
+  to a `contributors_field` multi-user picker, and a `co_author_noted` digest
+  event. New `--member` runs still recognize the full roster.
+- `GitHubClient.get_prs_by_filter` public library API: fetch PRs by any
+  combination of authors (OR), labels (AND), created date range, and
+  open/draft/merged state. Ported from the pytorch-jira-bot library surface
+  for external consumers such as pr-news.
