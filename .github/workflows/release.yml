@@ -21,7 +21,7 @@ jobs:
 
       - name: Test at the tagged ref
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,vertex]"
           python -m pytest tests/ -q
 
       - name: Version consistency
