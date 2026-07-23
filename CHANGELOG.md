@@ -38,5 +38,5 @@ breaking).
   event. New `--member` runs still recognize the full roster.
 - `GitHubClient.get_prs_by_filter` public library API: fetch PRs by any
   combination of authors (OR), labels (AND), created date range, and
-  open/draft/merged state. Ported from the pytorch-jira-bot library surface
-  for external consumers such as pr-news.
+  open/draft/merged state, for external tools consuming this package as a
+  library.
