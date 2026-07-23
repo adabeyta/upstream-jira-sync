@@ -1,5 +1,6 @@
 """GitHubClient GraphQL/REST parsing and the shared HTTP layer."""
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -219,6 +220,53 @@ class TestSearchQueries:
         _, variables = client._graphql.call_args.args
         assert "author:octocat" in variables["query"]
         assert "updated:>=2026-03-01T00:00:00" in variables["query"]
+
+    def test_get_prs_by_filter_builds_full_query(self):
+        client = _client()
+        client._graphql = MagicMock(
+            return_value={
+                "search": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [],
+                }
+            }
+        )
+        client.get_prs_by_filter(
+            authors=["octocat", "hubot"],
+            labels=["bug", "module: dynamo"],
+            created_after=datetime(2026, 3, 1),
+            created_before=datetime(2026, 3, 15),
+            is_open=True,
+            is_draft=False,
+            is_merged=False,
+        )
+        _, variables = client._graphql.call_args.args
+        query = variables["query"]
+        assert "repo:exampleorg/widgets" in query
+        assert "author:octocat" in query and "author:hubot" in query
+        assert "label:bug" in query and 'label:"module: dynamo"' in query
+        assert "is:open" in query
+        assert "draft:false" in query
+        assert "is:unmerged" in query
+        assert "created:2026-03-01..2026-03-15" in query
+
+    def test_get_prs_by_filter_defaults_leave_dimensions_unfiltered(self):
+        client = _client()
+        client._graphql = MagicMock(
+            return_value={
+                "search": {
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "nodes": [],
+                }
+            }
+        )
+        client.get_prs_by_filter(created_after=datetime(2026, 3, 1, 12, 30))
+        _, variables = client._graphql.call_args.args
+        query = variables["query"]
+        assert "is:pr" in query
+        assert "created:>=2026-03-01T12:30:00" in query
+        for absent in ("author:", "label:", "is:open", "draft:", "is:merged"):
+            assert absent not in query
 
     def test_get_pr_parses_single_pull_request(self):
         client = _client()

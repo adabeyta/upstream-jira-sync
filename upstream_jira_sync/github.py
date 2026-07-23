@@ -328,6 +328,60 @@ class GitHubClient(BaseHTTPClient):
         log.info("  GitHub: found %d PR(s) for @%s", len(results), author)
         return results
 
+    def get_prs_by_filter(
+        self,
+        authors: list[str] | None = None,
+        labels: list[str] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        is_open: bool | None = None,
+        is_draft: bool | None = None,
+        is_merged: bool | None = None,
+    ) -> list[PRWithReview]:
+        """Return PRs across self._repos matching all given filters.
+
+        Public library API for external consumers. None leaves a dimension
+        unfiltered; multiple authors are OR'd, multiple labels are AND'd.
+        """
+        query_parts = [self._repo_qualifier, "is:pr"]
+
+        for author in authors or []:
+            query_parts.append(f"author:{sanitize_identifier(author, 'author')}")
+
+        for label in labels or []:
+            if " " in label or ":" in label:
+                query_parts.append(f'label:"{label}"')
+            else:
+                query_parts.append(f"label:{label}")
+
+        if is_open is not None:
+            query_parts.append("is:open" if is_open else "is:closed")
+        if is_draft is not None:
+            query_parts.append("draft:true" if is_draft else "draft:false")
+        if is_merged is not None:
+            query_parts.append("is:merged" if is_merged else "is:unmerged")
+
+        if created_after and created_before:
+            query_parts.append(
+                f"created:{created_after.strftime('%Y-%m-%d')}"
+                f"..{created_before.strftime('%Y-%m-%d')}"
+            )
+        elif created_after:
+            query_parts.append(
+                f"created:>={created_after.strftime('%Y-%m-%dT%H:%M:%S')}"
+            )
+        elif created_before:
+            query_parts.append(
+                f"created:<={created_before.strftime('%Y-%m-%dT%H:%M:%S')}"
+            )
+
+        results = self._paginated_search(
+            self._SEARCH_QUERY, " ".join(query_parts), self.node_to_pr_with_review
+        )
+
+        log.info("  GitHub: found %d PR(s) with filters", len(results))
+        return results
+
     _REVIEW_ACTIVITY_QUERY: Final[str] = """
     query($query: String!, $after: String, $reviewer: String!) {
       search(query: $query, type: ISSUE, first: 50, after: $after) {
